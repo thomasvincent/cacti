@@ -153,7 +153,7 @@ Cacti CHANGELOG
 -issue#7473: Escape path_rrdcheck_log before it reaches the rrdcheck poller shell redirect
 -issue#7469: Escape path_php_binary before it reaches shell_exec in test_data_source
 -issue#7466: Escape path_stderrlog before it reaches the poller stderr shell redirect
--issue#XXXX: Replace the unmaintained csrf-magic library with symfony/security-csrf
+-issue#7744: Replace the unmaintained csrf-magic library with symfony/security-csrf
 -feature#412: Import Export for Graph and Tree rules
 -feature#1214: Move Tree Create/Remove/Modify Functions to lib/api_tree.php
 -feature#1361: UI should update alternate row colors

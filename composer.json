@@ -60,7 +60,9 @@
         "symfony/http-foundation": "^6.4",
         "symfony/mailer": "^6.4",
         "symfony/notifier": "^6.4",
+        "symfony/options-resolver": "^6.4",
         "symfony/password-hasher": "^6.4",
+        "symfony/process": "^6.4",
         "symfony/security-core": "^6.4",
         "symfony/security-csrf": "^6.4",
         "symfony/validator": "^6.4"
@@ -75,7 +77,7 @@
         "rector/rector": "^2.1.2"
     },
     "scripts": {
-        "lint": "phplint --no-cache --exclude=include/vendor --exclude=plugins ",
+        "lint": "phplint --no-cache --exclude=vendor --exclude=tests/vendor --exclude=include/vendor --exclude=plugins ",
         "phpstan": "phpstan analyse --level 6 ",
         "php-cs-fixer": "php-cs-fixer fix --allow-unsupported-php-version=yes --dry-run --diff --config=./.php-cs-fixer.php ",
         "phpcsfixer": "@php-cs-fixer",

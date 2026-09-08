@@ -23,6 +23,9 @@
 */
 
 require_once(__DIR__ . '/rrd_graph_item.php');
+require_once(__DIR__ . '/CactiRrdFilesystem.php');
+require_once(__DIR__ . '/CactiRrdGraphOptions.php');
+require_once(__DIR__ . '/CactiRrdProcess.php');
 
 define('RRD_NL', " \\\n");
 define('MAX_FETCH_CACHE_SIZE', 5);
@@ -390,22 +393,6 @@ function __rrd_execute(string|array $command_line, bool $log_to_stdout, int $out
 	// output information to the log file if appropriate
 	cacti_log('CACTI2RRD: ' . read_config_option('path_rrdtool') . " $command_line", $log_to_stdout, $logopt, POLLER_VERBOSITY_DEBUG);
 
-	// if we want to see the error output from rrdtool; make sure to specify this
-	$debug = '';
-
-	if (CACTI_SERVER_OS != 'win32') {
-		if (($output_flag == RRDTOOL_OUTPUT_STDERR || $output_flag == RRDTOOL_OUTPUT_RETURN_STDERR) && !is_resource($rrdtool_pipe)) {
-			$debug .= ' 2>&1';
-		}
-	}
-
-	// use popen to eliminate the zombie issue
-	if (CACTI_SERVER_OS == 'unix') {
-		$pipe_mode = 'r';
-	} else {
-		$pipe_mode = 'rb';
-	}
-
 	// an empty $rrdtool_pipe array means no fp is available
 	if ($rrdtool_pipe === null || $rrdtool_pipe === false || !is_resource($rrdtool_pipe)) {
 		if (str_starts_with($command_line, 'fetch') || str_starts_with($command_line, 'info') || str_starts_with($command_line, 'xport')) {
@@ -419,62 +406,19 @@ function __rrd_execute(string|array $command_line, bool $log_to_stdout, int $out
 		cacti_session_close();
 
 		if (is_file(read_config_option('path_rrdtool')) && is_executable(read_config_option('path_rrdtool'))) {
-			$descriptorspec = [
-				0 => ['pipe', 'r'],
-				1 => ['pipe', 'w']
-			];
-
 			if (CACTI_WEB) {
 				cacti_time_zone_set();
 			}
 
-			$attempts = 0;
-
-			$full_commandline = read_config_option('path_rrdtool') . $debug . ' ' . $command_line;
+			$attempts        = 0;
+			$processRunner   = new CactiRrdProcessRunner();
+			$fullCommandline = cacti_escapeshellarg(read_config_option('path_rrdtool')) . ' ' . $command_line;
 
 			while ($attempts < 5) {
-				if (0 == 1) { // @phpstan-ignore-line
-					/**
-					 * For debugging issue associated with RRDtool, for now I'm commenting out this line
-					 * There are issues processing graphv output with the --add-jsontime option when
-					 * rrdtool is launched in the background.
-					 *
-					 * The reason for this difference is still to be determined.
-					 *
-					 * cacti_log($command_line);
-					 */
-					$process = proc_open(read_config_option('path_rrdtool') . ' - ' . $debug, $descriptorspec, $pipes);
-
-					if (!is_resource($process)) {
-						$attempts++;
-
-						unset($process);
-					} else {
-						fwrite($pipes[0], $command_line . "\r\nquit\r\n");
-						fclose($pipes[0]);
-						$fp = $pipes[1];
-					}
-
-					if (!isset($fp)) {
-						rrdtool_reset_language();
-
-						return 'Error';
-					}
-
-					// get the output regardless of the output type
-					$output = '';
-
-					while (!feof($fp)) {
-						$output .= fgets($fp, 10000);
-					}
-
-					if (isset($process)) {
-						fclose($fp);
-						proc_close($process);
-					}
-				} else {
-					$output = shell_exec($full_commandline);
-				}
+				$result = $processRunner->run($fullCommandline, 300.0);
+				$output = ($output_flag == RRDTOOL_OUTPUT_STDERR || $output_flag == RRDTOOL_OUTPUT_RETURN_STDERR)
+					? $result->diagnosticOutput()
+					: $result->output;
 
 				if ($output_flag == RRDTOOL_OUTPUT_STDOUT || $output_flag == RRDTOOL_OUTPUT_GRAPH_DATA) {
 					if ($output == '' || $output === null) {
@@ -809,6 +753,7 @@ function rrdtool_function_create(int $local_data_id, bool $show_source, mixed $r
 	include(CACTI_PATH_INCLUDE . '/global_arrays.php');
 
 	$data_source_path = get_data_source_path($local_data_id, true);
+	$filesystem       = new CactiRrdFilesystem();
 
 	/**
 	 * ok, if that passes lets check to make sure an rra does not already
@@ -962,11 +907,10 @@ function rrdtool_function_create(int $local_data_id, bool $show_source, mixed $r
 			}
 		} elseif (!is_dir(dirname($data_source_path))) {
 			if (CACTI_WEB == false || is_writable(CACTI_PATH_RRA)) {
-				if (mkdir(dirname($data_source_path), 0775, true)) {
+				if ($filesystem->createDirectory(dirname($data_source_path))) {
 					if (CACTI_SERVER_OS != 'win32' && posix_getuid() == 0) {
-						$success  = true;
-						$paths    = explode('/', str_replace(CACTI_PATH_RRA, '/', dirname($data_source_path)));
-						$spath    = '';
+						$paths = explode('/', str_replace(CACTI_PATH_RRA, '/', dirname($data_source_path)));
+						$spath = '';
 
 						foreach ($paths as $path) {
 							if ($path == '') {
@@ -978,13 +922,9 @@ function rrdtool_function_create(int $local_data_id, bool $show_source, mixed $r
 							$powner_id = fileowner(CACTI_PATH_RRA . $spath);
 							$pgroup_id = filegroup(CACTI_PATH_RRA . $spath);
 
-							if ($powner_id !== false && $owner_id !== false && $powner_id != $owner_id) {
-								$success = chown(CACTI_PATH_RRA . $spath, $owner_id);
-							}
-
-							if ($pgroup_id !== false && $group_id !== false && $pgroup_id != $group_id && $success) {
-								$success = chgrp(CACTI_PATH_RRA . $spath, $group_id);
-							}
+							$pathOwner = ($powner_id !== false && $owner_id !== false && $powner_id != $owner_id) ? $owner_id : null;
+							$pathGroup = ($pgroup_id !== false && $group_id !== false && $pgroup_id != $group_id) ? $group_id : null;
+							$success   = $filesystem->changeOwnership(CACTI_PATH_RRA . $spath, $pathOwner, $pathGroup);
 
 							if (!$success) {
 								cacti_log("ERROR: Unable to set directory permissions for '" . CACTI_PATH_RRA . $spath . "'", false);
@@ -1009,8 +949,9 @@ function rrdtool_function_create(int $local_data_id, bool $show_source, mixed $r
 
 		if (CACTI_SERVER_OS != 'win32' && posix_getuid() == 0) {
 			if (file_exists($data_source_path)) {
-				chown($data_source_path, (int) $owner_id);
-				chgrp($data_source_path, (int) $group_id);
+				if (!$filesystem->changeOwnership($data_source_path, (int) $owner_id, (int) $group_id)) {
+					cacti_log("WARNING: Unable to set ownership on RRDfile '$data_source_path'.", false, 'POLLER');
+				}
 			} else {
 				cacti_log("WARNING: RRDCreate using command 'create $data_source_path $create_ds$create_rra' failed!", false, 'POLLER');
 			}
@@ -1084,40 +1025,40 @@ function rrdtool_function_tune(array $rrd_tune_array) : void {
 	$data_source_type = $data_source_types[$rrd_tune_array['data-source-type']];
 	$data_source_path = get_data_source_path($rrd_tune_array['data_source_id'], true);
 
-	$rrd_tune = '';
+	$rrd_tune = [];
 
 	if ($rrd_tune_array['heartbeat'] != '') {
-		$rrd_tune .= ' --heartbeat ' . cacti_escapeshellarg($data_source_name . ':' . $rrd_tune_array['heartbeat']);
+		array_push($rrd_tune, '--heartbeat', $data_source_name . ':' . $rrd_tune_array['heartbeat']);
 	}
 
 	if ($rrd_tune_array['minimum'] != '') {
-		$rrd_tune .= ' --minimum ' . cacti_escapeshellarg($data_source_name . ':' . $rrd_tune_array['minimum']);
+		array_push($rrd_tune, '--minimum', $data_source_name . ':' . $rrd_tune_array['minimum']);
 	}
 
 	if ($rrd_tune_array['maximum'] != '') {
-		$rrd_tune .= ' --maximum ' . cacti_escapeshellarg($data_source_name . ':' . $rrd_tune_array['maximum']);
+		array_push($rrd_tune, '--maximum', $data_source_name . ':' . $rrd_tune_array['maximum']);
 	}
 
 	if ($rrd_tune_array['data-source-type'] != '') {
-		$rrd_tune .= ' --data-source-type ' . cacti_escapeshellarg($data_source_name . ':' . $data_source_type);
+		array_push($rrd_tune, '--data-source-type', $data_source_name . ':' . $data_source_type);
 	}
 
 	if ($rrd_tune_array['data-source-rename'] != '') {
-		$rrd_tune .= ' --data-source-rename ' . cacti_escapeshellarg($data_source_name . ':' . $rrd_tune_array['data-source-rename']);
+		array_push($rrd_tune, '--data-source-rename', $data_source_name . ':' . $rrd_tune_array['data-source-rename']);
 	}
 
-	if ($rrd_tune != '') {
+	if ($rrd_tune !== []) {
 		if (file_exists($data_source_path) == true) {
 			if (is_file(read_config_option('path_rrdtool')) && is_executable(read_config_option('path_rrdtool'))) {
-				$rrd_cmd = cacti_escapeshellcmd(read_config_option('path_rrdtool')) . ' tune ' . cacti_escapeshellarg($data_source_path) . $rrd_tune;
+				$rrd_cmd = array_merge([read_config_option('path_rrdtool'), 'tune', $data_source_path], $rrd_tune);
+				$result  = (new CactiRrdProcessRunner())->run($rrd_cmd, 60.0);
+				$log_cmd = implode(' ', array_map('cacti_escapeshellarg', $rrd_cmd));
 
-				$fp = popen($rrd_cmd, 'r');
+				cacti_log('CACTI2RRD: ' . $log_cmd, false, 'WEBLOG', POLLER_VERBOSITY_DEBUG);
 
-				if ($fp !== false) {
-					pclose($fp);
+				if (!$result->successful()) {
+					cacti_log('ERROR: RRDtool tune failed: ' . trim($result->diagnosticOutput()), false, 'RRDTOOL');
 				}
-
-				cacti_log('CACTI2RRD: ' . $rrd_cmd, false, 'WEBLOG', POLLER_VERBOSITY_DEBUG);
 			} else {
 				cacti_log("ERROR: RRDtool executable not found, not executable or error in path '" . read_config_option('path_rrdtool') . "'.  No output written to RRDfile.");
 			}
@@ -1255,6 +1196,7 @@ function rrd_function_process_graph_options(int $graph_start, int $graph_end, ar
 	global $image_types;
 
 	include(CACTI_PATH_INCLUDE . '/global_arrays.php');
+	$graph_data_array = CactiRrdGraphOptions::resolve($graph_data_array);
 
 	// define some variables
 	$scale               = '';
@@ -1601,6 +1543,14 @@ function rrdtool_function_graph(int $local_graph_id, mixed $rra_id, array $graph
 		if (!is_graph_allowed($local_graph_id, $user)) {
 			return 'GRAPH ACCESS DENIED';
 		}
+	}
+
+	try {
+		$graph_data_array = CactiRrdGraphOptions::resolve($graph_data_array);
+	} catch (Symfony\Component\OptionsResolver\Exception\InvalidOptionsException $exception) {
+		cacti_log('ERROR: Invalid RRDtool graph options: ' . $exception->getMessage(), false, 'RRDTOOL');
+
+		return 'ERROR: Invalid graph options';
 	}
 
 	if (getenv('LANG') == '') {
@@ -2954,7 +2904,10 @@ function rrdtool_function_graph(int $local_graph_id, mixed $rra_id, array $graph
 				if ($fp = fopen($graph_data_array['export_realtime'], 'w')) {
 					fwrite($fp, $output, strlen($output));
 					fclose($fp);
-					chmod($graph_data_array['export_realtime'], 0644);
+
+					if (!(new CactiRrdFilesystem())->changeMode($graph_data_array['export_realtime'], 0644)) {
+						cacti_log("WARNING: Unable to set graph export permissions on '{$graph_data_array['export_realtime']}'.");
+					}
 				}
 
 				return $output;
@@ -3885,7 +3838,8 @@ function print_leaves(array $array) : void {
  * @return void
  */
 function rrdtool_tune(string $rrd_file, array $diff, bool $show_source = true) : void {
-	$rrd_path = read_config_option('path_rrdtool');
+	$rrd_path   = read_config_option('path_rrdtool');
+	$filesystem = new CactiRrdFilesystem();
 
 	$cmd = [];
 
@@ -3935,7 +3889,10 @@ function rrdtool_tune(string $rrd_file, array $diff, bool $show_source = true) :
 				}
 			} else {
 				rrdtool_execute("resize $line", true, RRDTOOL_OUTPUT_STDOUT);
-				rename(dirname($rrd_file) . '/resize.rrd', $rrd_file);
+
+				if (!$filesystem->move(dirname($rrd_file) . '/resize.rrd', $rrd_file, true)) {
+					cacti_log("ERROR: Unable to replace RRDfile '$rrd_file' with resized data.", false, 'RRDTOOL');
+				}
 			}
 		}
 	}
@@ -3990,6 +3947,7 @@ function rrd_datasource_add(array $file_array, array $ds_array, bool $debug) : m
 	global $data_source_types, $consolidation_functions;
 
 	$rrdtool_pipe = rrd_init();
+	$filesystem   = new CactiRrdFilesystem();
 
 	// iterate all given rrd files
 	foreach ($file_array as $file) {
@@ -4042,8 +4000,11 @@ function rrd_datasource_add(array $file_array, array $ds_array, bool $debug) : m
 				if (is_writable($file)) {
 					// restore the modified XML to rrd
 					rrdtool_execute("restore -f $xml_file $file", false, RRDTOOL_OUTPUT_STDOUT, $rrdtool_pipe, 'UTIL');
+
 					// scratch that XML file to avoid filling up the disk
-					unlink($xml_file);
+					if (!$filesystem->remove($xml_file)) {
+						cacti_log("WARNING: Unable to remove temporary RRD XML file '$xml_file'.", false, 'UTIL');
+					}
 					cacti_log('Added Data Source(s) to RRDfile: ' . $file, false, 'UTIL');
 				} else {
 					$check['err_msg'] = __('ERROR: RRDfile %s not writeable', $file);
@@ -4070,6 +4031,7 @@ function rrd_datasource_add(array $file_array, array $ds_array, bool $debug) : m
  */
 function rrd_rra_delete(array $file_array, array $rra_array, bool $debug) : mixed {
 	$rrdtool_pipe = rrd_init();
+	$filesystem   = new CactiRrdFilesystem();
 
 	// iterate all given rrd files
 	foreach ($file_array as $file) {
@@ -4106,8 +4068,11 @@ function rrd_rra_delete(array $file_array, array $rra_array, bool $debug) : mixe
 				if (is_writable($file)) {
 					// restore the modified XML to rrd
 					rrdtool_execute("restore -f $xml_file $file", false, RRDTOOL_OUTPUT_STDOUT, $rrdtool_pipe, 'UTIL');
+
 					// scratch that XML file to avoid filling up the disk
-					unlink($xml_file);
+					if (!$filesystem->remove($xml_file)) {
+						cacti_log("WARNING: Unable to remove temporary RRD XML file '$xml_file'.", false, 'UTIL');
+					}
 					cacti_log('Deleted RRA(s) from RRDfile: ' . $file, false, 'UTIL');
 				} else {
 					$check['err_msg'] = __('ERROR: RRDfile %s not writeable', $file);
@@ -4135,6 +4100,7 @@ function rrd_rra_delete(array $file_array, array $rra_array, bool $debug) : mixe
  */
 function rrd_rra_clone(array $file_array, string $cf, array $rra_array, bool $debug) : mixed {
 	$rrdtool_pipe = rrd_init();
+	$filesystem   = new CactiRrdFilesystem();
 
 	// iterate all given rrd files
 	foreach ($file_array as $file) {
@@ -4171,8 +4137,11 @@ function rrd_rra_clone(array $file_array, string $cf, array $rra_array, bool $de
 				if (is_writable($file)) {
 					// restore the modified XML to rrd
 					rrdtool_execute("restore -f $xml_file $file", false, RRDTOOL_OUTPUT_STDOUT, $rrdtool_pipe, 'UTIL');
+
 					// scratch that XML file to avoid filling up the disk
-					unlink($xml_file);
+					if (!$filesystem->remove($xml_file)) {
+						cacti_log("WARNING: Unable to remove temporary RRD XML file '$xml_file'.", false, 'UTIL');
+					}
 					cacti_log('Deleted RRA(s) from RRDfile: ' . $file, false, 'UTIL');
 				} else {
 					$check['err_msg'] = __('ERROR: RRDfile %s not writeable', $file);

@@ -47,17 +47,17 @@ test('__rrd_execute escapes array arguments one at a time', function () use ($rr
 	expect($source)->toContain("\$command_line = implode(' ', array_map('cacti_escapeshellarg', \$command_line));");
 });
 
-test('the shell_exec command line is assembled without a whole-command escape', function () use ($rrdPath) {
+test('one-shot commands use Symfony Process without a whole-command escape', function () use ($rrdPath) {
 	$source = file_get_contents($rrdPath);
 
-	expect($source)->toContain("\$full_commandline = read_config_option('path_rrdtool') . \$debug . ' ' . \$command_line;");
-	expect($source)->toContain('$output = shell_exec($full_commandline);');
+	expect($source)->toContain("\$fullCommandline = cacti_escapeshellarg(read_config_option('path_rrdtool')) . ' ' . \$command_line;");
+	expect($source)->toContain('$result = $processRunner->run($fullCommandline, 300.0);');
+	expect($source)->not->toContain('shell_exec($fullCommandline)');
 });
 
-test('the pipe writers pass the command line through untouched', function () use ($rrdPath) {
+test('the persistent pipe writer passes the command line through untouched', function () use ($rrdPath) {
 	$source = file_get_contents($rrdPath);
 
-	expect($source)->toContain('fwrite($pipes[0], $command_line . "\r\nquit\r\n");');
 	expect($source)->toContain('if (fwrite($rrdtool_pipe, " $command_line\r\n") === false) {');
 });
 
